@@ -14,6 +14,8 @@ library(ggplot2)
 library(zoo)
 library(tseries)
 library(forecast)
+library(urca)
+library(MCS)
 
 # Load the data (adjust the path if needed)
 #getwd()
@@ -100,7 +102,6 @@ train_ts_seasonal <- ts(as.numeric(as.vector(train$demand)), frequency = 24)
 # Differencing for ARIMA (no seasonality)
 #------------------------------
 #if you want to see entire output of test instead of justing using forecast package:
-library(urca)
 #ADF and KPSS for non-seasonal d (not yet seasonal differencing)
 adf_res <- ur.df(citibike$demand, type="none", selectlags="AIC")
 print(summary(adf_res))
@@ -210,11 +211,11 @@ summary(sarima_211_101)
 #----------------------------------
 
 auto_sarima <-auto.arima(train_ts_seasonal,
-                            seasonal = TRUE,
-                            stepwise = TRUE,
-                            approximation = TRUE,
-                            max.p = 3, max.q = 3,
-                            max.P = 2, max.Q = 2)
+                         seasonal = TRUE,
+                         stepwise = TRUE,
+                         approximation = TRUE,
+                         max.p = 3, max.q = 3,
+                         max.P = 2, max.Q = 2)
 summary(auto_sarima)
 
 
@@ -285,112 +286,110 @@ model_compare <- data.frame(
 print("=== AIC/BIC/LogLik Comparison ===")
 print(model_compare)
 
+
 # ============================================================
 # Out-of-Sample Model Forecasts
 # ============================================================
 
 #function to prevent negative forecasts
-no_negative <- function(x) {
-  x[x < 0] <- 0
-  return(x)
+no_negative <- function(x) { x[x < 0] <- 0; x }
+
+#prevent error such that we just get NA
+safe_fit <- function(model_fun, ts_data) {
+  fit <- try(model_fun(ts_data), silent = TRUE)
+  if (inherits(fit, "try-error")) return(NULL)
+  fit
 }
 
-# Define test data and sample sizes for non-differenced sample
+#rolling forecast function
+rolling <- function(model_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE) {
+  rolling_fc <- matrix(NA, nrow = n_test_days, ncol = 24)
+  #print(model_fun)
+  for (i in 1:n_test_days) {
+    #constant sample size: include 1 new day of forecast every loop
+    start_idx <- (i - 1) * 24 + 1
+    end_idx   <- start_idx + n_train_hours - 1
+    
+    train_roll <- ts_full[start_idx:end_idx]
+    train_ts   <- if (seasonal) ts(train_roll, frequency = 24) else ts(train_roll)
+    
+    fit <- safe_fit(model_fun, train_ts)
+    if (is.null(fit)) { rolling_fc[i, ] <- rep(NA, 24); next }
+    
+    fc <- forecast(fit, h = 24)$mean
+    #no negative forecasts
+    rolling_fc[i, ] <- no_negative(fc)
+  }
+  rolling_fc
+}
+
+#expanding forecast function
+expanding <- function(model_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE) {
+  expanding_fc <- matrix(NA, nrow = n_test_days, ncol = 24)
+  
+  for (i in 1:n_test_days) {
+    #only extend sample size: include 1 new day of forecast every loop
+    end_idx <- n_train_hours + (i - 1) * 24
+    train_expand <- ts_full[1:end_idx]
+    train_ts <- if (seasonal) ts(train_expand, frequency = 24) else ts(train_expand)
+    
+    fit <- safe_fit(model_fun, train_ts)
+    if (is.null(fit)) { expanding_fc[i, ] <- rep(NA, 24); next }
+    
+    fc <- forecast(fit, h = 24)$mean
+    #no negative forecasts
+    expanding_fc[i, ] <- no_negative(fc)
+  }
+  expanding_fc
+}
+
+#Define test data and sample sizes for non-differenced sample
+ts_full <- citibike$demand
 test_data <- citibike %>% filter(month == 5)
 n_test_days <- length(unique(test_data$day))
 n_train_hours <- length(train_ts_seasonal)
 
 #collect all non-fitted models as functions
-ARIMA_111_fun <- function(ts_data) {
-  Arima(ts_data, order = c(1,1,1), seasonal = FALSE)
-}
-ARIMA_211_fun <- function(ts_data) {
-  Arima(ts_data, order = c(2,1,1), seasonal = FALSE)
-}
-ARIMA_112_fun <- function(ts_data) {
-  Arima(ts_data, order = c(1,1,2), seasonal = FALSE)
-}
-ARIMA_auto_fun <- function(ts_data){
-  auto.arima(ts_data, seasonal = FALSE)
-}
-SARIMA_112_101_fun <- function(ts_data) {
-  Arima(ts_data, order = c(1,1,2), seasonal = list(order = c(1,0,1), period = 24), method ="ML")
-}
-SARIMA_211_101_fun <- function(ts_data) {
-  Arima(ts_data, order = c(2,1,1), seasonal = list(order = c(1,0,1), period = 24), method = "ML")
-}
-SARIMA_auto_fun <- function(ts_data) {
-  auto.arima(ts_data,
-             seasonal = TRUE,
-             stepwise = TRUE,
-             approximation = TRUE,
-             max.p = 3, max.q = 3,
-             max.P = 2, max.Q = 2)
-}
+ARIMA_111_fun <- function(ts_data) Arima(ts_data, order=c(1,1,1), seasonal=FALSE)
+ARIMA_211_fun <- function(ts_data) Arima(ts_data, order=c(2,1,1), seasonal=FALSE)
+ARIMA_112_fun <- function(ts_data) Arima(ts_data, order=c(1,1,2), seasonal=FALSE)
+ARIMA_auto_fun <- function(ts_data) auto.arima(ts_data, seasonal=FALSE)
+
+SARIMA_112_101_fun <- function(ts_data) Arima(ts_data, order=c(1,1,2), seasonal=list(order=c(1,0,1), period=24))
+SARIMA_211_101_fun <- function(ts_data) Arima(ts_data, order=c(2,1,1), seasonal=list(order=c(1,0,1), period=24))
+SARIMA_auto_fun <- function(ts_data) auto.arima(ts_data, seasonal=TRUE,  stepwise = TRUE,
+                                                approximation = TRUE,
+                                                max.p = 3, max.q = 3,
+                                                max.P = 2, max.Q = 2)
+
 ETS_fun <- function(ts_data) ets(ts_data)
 
-#rolling forecast function
-rolling <- function(model_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE) {
-  #print(model_fun)
-  rolling_fc <- matrix(NA, nrow = n_test_days, ncol = 24)
-  for (i in 1:n_test_days) {
-    #constant sample size: include 1 new day of forecast every loop
-    rolling_end <- (i-1)*24 + n_train_hours 
-    train_roll <- ts_full[1:rolling_end]
-    
-    if(seasonal){
-      train_ts_roll <- ts(train_roll, frequency = 24)
-    } else {
-      train_ts_roll <- ts(train_roll)
-    }
-    fit <- model_fun(train_ts_roll)
-    fc <- forecast(fit, h = 24)$mean
-    #set negative to 0 in forecast
-    rolling_fc[i, ] <- no_negative(fc)
-  }
-  return(rolling_fc)
-}
-
-#expanding forecast function
-expanding <- function(model_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE) {
-  #print(model_fun)
-  expanding_fc <- matrix(NA, nrow = n_test_days, ncol = 24)
-  for (i in 1:n_test_days) {
-    train_expand <- ts_full[1:(n_train_hours + (i-1)*24)]
-    if(seasonal){
-      train_ts_expand <- ts(train_expand, frequency = 24)
-    } else {
-      train_ts_expand <- ts(train_expand)
-    }
-    fit <- model_fun(train_ts_expand)
-    fc <- forecast(fit, h = 24)$mean
-    expanding_fc[i, ] <- no_negative(fc)
-  }
-  return(expanding_fc)
-}
-ts_full <- citibike$demand
 #store rolling forecasts results
 rolling_results <- list(
-  ARIMA_111 = rolling(ARIMA_111_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE),
-  ARIMA_211 = rolling(ARIMA_211_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE),
-  ARIMA_112 = rolling(ARIMA_112_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE),
-  ARIMA_auto = rolling(ARIMA_auto_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE),
-  SARIMA_112_101 = rolling(SARIMA_112_101_fun, ts_full, n_train_hours, n_test_days, seasonal=TRUE),
-  SARIMA_211_101 = rolling(SARIMA_211_101_fun, ts_full, n_train_hours, n_test_days, seasonal=TRUE),
-  SARIMA_auto = rolling(SARIMA_auto_fun, ts_full, n_train_hours, n_test_days, seasonal=TRUE),
-  ETS = rolling(ETS_fun, ts_full, n_train_hours, n_test_days, seasonal=TRUE)
+  ARIMA_111 = rolling(ARIMA_111_fun, ts_full, n_train_hours, n_test_days, FALSE),
+  ARIMA_211 = rolling(ARIMA_211_fun, ts_full, n_train_hours, n_test_days, FALSE),
+  ARIMA_112 = rolling(ARIMA_112_fun, ts_full, n_train_hours, n_test_days, FALSE),
+  ARIMA_auto = rolling(ARIMA_auto_fun, ts_full, n_train_hours, n_test_days, FALSE),
+  
+  SARIMA_112_101 = rolling(SARIMA_112_101_fun, ts_full, n_train_hours, n_test_days, TRUE),
+  SARIMA_211_101 = rolling(SARIMA_211_101_fun, ts_full, n_train_hours, n_test_days, TRUE),
+  SARIMA_auto = rolling(SARIMA_auto_fun, ts_full, n_train_hours, n_test_days, TRUE),
+  
+  ETS = rolling(ETS_fun, ts_full, n_train_hours, n_test_days, TRUE)
 )
 
 #store expanding forecasts results
 expanding_results <- list(
-  ARIMA_111 = expanding(ARIMA_111_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE),
-  ARIMA_211 = expanding(ARIMA_211_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE),
-  ARIMA_112 = expanding(ARIMA_112_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE),
-  ARIMA_auto = expanding(ARIMA_auto_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE),
-  SARIMA_112_101 = expanding(SARIMA_112_101_fun,ts_full, n_train_hours, n_test_days, seasonal=TRUE),
-  SARIMA_211_101 = expanding(SARIMA_211_101_fun, ts_full, n_train_hours, n_test_days, seasonal=TRUE),
-  SARIMA_auto = expanding(SARIMA_auto_fun, ts_full, n_train_hours, n_test_days, seasonal=TRUE),
-  ETS = expanding(ETS_fun, ts_full, n_train_hours, n_test_days, seasonal=TRUE)
+  ARIMA_111 = expanding(ARIMA_111_fun, ts_full, n_train_hours, n_test_days, FALSE),
+  ARIMA_211 = expanding(ARIMA_211_fun, ts_full, n_train_hours, n_test_days, FALSE),
+  ARIMA_112 = expanding(ARIMA_112_fun, ts_full, n_train_hours, n_test_days, FALSE),
+  ARIMA_auto = expanding(ARIMA_auto_fun, ts_full, n_train_hours, n_test_days, FALSE),
+  
+  SARIMA_112_101 = expanding(SARIMA_112_101_fun, ts_full, n_train_hours, n_test_days, TRUE),
+  SARIMA_211_101 = expanding(SARIMA_211_101_fun, ts_full, n_train_hours, n_test_days, TRUE),
+  SARIMA_auto = expanding(SARIMA_auto_fun, ts_full, n_train_hours, n_test_days, TRUE),
+  
+  ETS = expanding(ETS_fun, ts_full, n_train_hours, n_test_days, TRUE)
 )
 
 #plot forecasts:
@@ -428,230 +427,17 @@ for(model_name in names(expanding_results)){
   plot_forecast_simple(expanding_results[[model_name]], ts_full, n_train_hours, n_test_days, paste("Expanding -", model_name))
 }
 
-# Build the actual demand matrix (days × hours)
-actual_matrix <- matrix(
-  test_data$demand,
-  nrow = n_test_days,
-  ncol = 24,
-  byrow = TRUE
-)
-rolling_errors <- lapply(rolling_results, function(fc) actual_matrix - fc)
-expanding_errors <- lapply(expanding_results, function(fc) actual_matrix - fc)
-MAE  <- function(e) mean(abs(e))
-RMSE <- function(e) sqrt(mean(e^2))
 
-MAPE <- function(actual, forecast, eps = 1e-6) {
-  actual_safe <- ifelse(actual == 0, eps, actual)
-  mean(abs((actual - forecast) / actual_safe))
-}
-
-MASE <- function(actual, forecast, training_data) {
-  naive_mae <- mean(abs(diff(training_data)))
-  mean(abs(actual - forecast)) / naive_mae
-}
-
-compute_accuracy <- function(error_matrix, forecast_matrix, train_ts) {
-  e <- as.numeric(error_matrix)
-  a <- as.numeric(actual_matrix)
-  f <- as.numeric(forecast_matrix)
-  
-  data.frame(
-    MAE  = MAE(e),
-    RMSE = RMSE(e),
-    MASE = MASE(a, f, train_ts),
-    MAPE = MAPE(a, f)
-  )
-}
-rolling_accuracy <- mapply(
-  compute_accuracy,
-  error_matrix = rolling_errors,
-  forecast_matrix = rolling_results,
-  MoreArgs = list(train_ts = ts_full[1:n_train_hours]),
-  SIMPLIFY = FALSE
-)
-
-cat("\n===== Rolling Forecast Accuracy =====\n")
-print(do.call(rbind, rolling_accuracy))
-
-expanding_accuracy <- mapply(
-  compute_accuracy,
-  error_matrix = expanding_errors,
-  forecast_matrix = expanding_results,
-  MoreArgs = list(train_ts = ts_full[1:n_train_hours]),
-  SIMPLIFY = FALSE
-)
-
-cat("\n===== Expanding Forecast Accuracy =====\n")
-print(do.call(rbind, expanding_accuracy))
-
-naive_mae <- mean(abs(diff(ts_full[1:n_train_hours])))
-mase_loss <- function(e, naive_mae) abs(e) / naive_mae
-
-dm_test_mase <- function(error_list, naive_mae) {
-  models <- names(error_list)
-  K <- length(models)
-  dm_mat <- matrix(NA, K, K, dimnames = list(models, models))
-  
-  for (i in 1:K) {
-    for (j in 1:K) {
-      if (i == j) next
-      
-      e1 <- as.numeric(error_list[[i]])
-      e2 <- as.numeric(error_list[[j]])
-      
-      good <- complete.cases(e1, e2)
-      e1 <- e1[good]; e2 <- e2[good]
-      
-      L1 <- mase_loss(e1, naive_mae)
-      L2 <- mase_loss(e2, naive_mae)
-      
-      d <- L1 - L2
-      if (var(d) == 0) {
-        dm_mat[i, j] <- NA
-        next
-      }
-      
-      test <- try(dm.test(L1, L2, h = 1, power = 1)$p.value, silent = TRUE)
-      dm_mat[i, j] <- ifelse(inherits(test, "try-error"), NA, test)
-    }
-  }
-  dm_mat
-}
-rolling_dm_mase <- dm_test_mase(rolling_errors, naive_mae)
-
-cat("\n===== Diebold–Mariano Test (MASE Loss) =====\n")
-print(rolling_dm_mase)
-
-loss_matrix <- sapply(rolling_errors, function(e) mase_loss(as.numeric(e), naive_mae))
-colnames(loss_matrix) <- names(rolling_errors)
-loss_matrix <- loss_matrix[complete.cases(loss_matrix), , drop = FALSE]
-zero_var <- apply(loss_matrix, 2, function(x) var(x) <= 1e-12)
-loss_matrix_clean <- loss_matrix[, !zero_var, drop = FALSE]
-
-cat("Removed models (zero loss variance):", names(zero_var[zero_var]), "\n")
-library(MCS)
-
-mcs_mase <- MCSprocedure(
-  Loss  = loss_matrix_clean,
-  alpha = 0.05,
-  B     = 2000
-)
-
-cat("\n===== Model Confidence Set (MASE Loss) =====\n")
-print(mcs_mase)
-
-
-# ============================================================
-# FINAL COMPLETE PIPELINE — ONE CHUNK
-# Rolling Window (Correct), Expanding Window, Accuracy, DM, MCS
-# ============================================================
-
-library(dplyr)
-library(lubridate)
-library(forecast)
-library(MCS)
-
-# ---------- 0. Helper Functions ----------
-no_negative <- function(x) { x[x < 0] <- 0; x }
-
-safe_fit <- function(model_fun, ts_data) {
-  fit <- try(model_fun(ts_data), silent = TRUE)
-  if (inherits(fit, "try-error")) return(NULL)
-  fit
-}
-
-# ---------- 1. Correct Rolling Window ----------
-rolling <- function(model_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE) {
-  rolling_fc <- matrix(NA, nrow = n_test_days, ncol = 24)
-  
-  for (i in 1:n_test_days) {
-    start_idx <- (i - 1) * 24 + 1
-    end_idx   <- start_idx + n_train_hours - 1
-    
-    train_roll <- ts_full[start_idx:end_idx]
-    train_ts   <- if (seasonal) ts(train_roll, frequency = 24) else ts(train_roll)
-    
-    fit <- safe_fit(model_fun, train_ts)
-    if (is.null(fit)) { rolling_fc[i, ] <- rep(NA, 24); next }
-    
-    fc <- forecast(fit, h = 24)$mean
-    rolling_fc[i, ] <- no_negative(fc)
-  }
-  rolling_fc
-}
-
-# ---------- 2. Expanding Window ----------
-expanding <- function(model_fun, ts_full, n_train_hours, n_test_days, seasonal=FALSE) {
-  expanding_fc <- matrix(NA, nrow = n_test_days, ncol = 24)
-  
-  for (i in 1:n_test_days) {
-    end_idx <- n_train_hours + (i - 1) * 24
-    train_expand <- ts_full[1:end_idx]
-    train_ts <- if (seasonal) ts(train_expand, frequency = 24) else ts(train_expand)
-    
-    fit <- safe_fit(model_fun, train_ts)
-    if (is.null(fit)) { expanding_fc[i, ] <- rep(NA, 24); next }
-    
-    fc <- forecast(fit, h = 24)$mean
-    expanding_fc[i, ] <- no_negative(fc)
-  }
-  expanding_fc
-}
-
-# ---------- 3. Rolling Setup ----------
-ts_full <- citibike$demand
-test_data <- citibike %>% filter(month == 5)
-n_test_days <- length(unique(test_data$day))
-
-# IMPORTANT: Rolling window size (120 days)
-n_train_hours <- 24 * 120
-
-# ---------- 4. Model Definitions ----------
-ARIMA_111_fun <- function(ts_data) Arima(ts_data, order=c(1,1,1), seasonal=FALSE)
-ARIMA_211_fun <- function(ts_data) Arima(ts_data, order=c(2,1,1), seasonal=FALSE)
-ARIMA_112_fun <- function(ts_data) Arima(ts_data, order=c(1,1,2), seasonal=FALSE)
-ARIMA_auto_fun <- function(ts_data) auto.arima(ts_data, seasonal=FALSE)
-
-SARIMA_112_101_fun <- function(ts_data) Arima(ts_data, order=c(1,1,2), seasonal=list(order=c(1,0,1), period=24),method = "ML")
-SARIMA_211_101_fun <- function(ts_data) Arima(ts_data, order=c(2,1,1), seasonal=list(order=c(1,0,1), period=24),method = "ML")
-SARIMA_auto_fun <- function(ts_data) auto.arima(ts_data, seasonal=TRUE)
-
-ETS_fun <- function(ts_data) ets(ts_data)
-
-# ---------- 5. Rolling Forecasts ----------
-rolling_results <- list(
-  ARIMA_111 = rolling(ARIMA_111_fun, ts_full, n_train_hours, n_test_days, FALSE),
-  ARIMA_211 = rolling(ARIMA_211_fun, ts_full, n_train_hours, n_test_days, FALSE),
-  ARIMA_112 = rolling(ARIMA_112_fun, ts_full, n_train_hours, n_test_days, FALSE),
-  ARIMA_auto = rolling(ARIMA_auto_fun, ts_full, n_train_hours, n_test_days, FALSE),
-  
-  SARIMA_112_101 = rolling(SARIMA_112_101_fun, ts_full, n_train_hours, n_test_days, TRUE),
-  SARIMA_211_101 = rolling(SARIMA_211_101_fun, ts_full, n_train_hours, n_test_days, TRUE),
-  SARIMA_auto = rolling(SARIMA_auto_fun, ts_full, n_train_hours, n_test_days, TRUE),
-  
-  ETS = rolling(ETS_fun, ts_full, n_train_hours, n_test_days, TRUE)
-)
-
-# ---------- 6. Expanding Forecasts ----------
-expanding_results <- list(
-  ARIMA_111 = expanding(ARIMA_111_fun, ts_full, n_train_hours, n_test_days, FALSE),
-  ARIMA_211 = expanding(ARIMA_211_fun, ts_full, n_train_hours, n_test_days, FALSE),
-  ARIMA_112 = expanding(ARIMA_112_fun, ts_full, n_train_hours, n_test_days, FALSE),
-  ARIMA_auto = expanding(ARIMA_auto_fun, ts_full, n_train_hours, n_test_days, FALSE),
-  
-  SARIMA_112_101 = expanding(SARIMA_112_101_fun, ts_full, n_train_hours, n_test_days, TRUE),
-  SARIMA_211_101 = expanding(SARIMA_211_101_fun, ts_full, n_train_hours, n_test_days, TRUE),
-  SARIMA_auto = expanding(SARIMA_auto_fun, ts_full, n_train_hours, n_test_days, TRUE),
-  
-  ETS = expanding(ETS_fun, ts_full, n_train_hours, n_test_days, TRUE)
-)
-
-# ---------- 7. Accuracy Metrics ----------
+##########################
+#Out of sample comparison
+#######################
+#define metrics
 MAE <- function(e) mean(abs(e))
 RMSE <- function(e) sqrt(mean(e^2))
 MAPE <- function(a, f, eps=1e-6) mean(abs((a-f)/(ifelse(a==0,eps,a))))
 MASE <- function(a, f, train) mean(abs(a-f)) / mean(abs(diff(train)))
 
+#construct matrix
 actual_matrix <- matrix(test_data$demand, nrow=n_test_days, ncol=24, byrow=TRUE)
 
 compute_accuracy <- function(err_mat, fc_mat, train) {
@@ -666,7 +452,7 @@ compute_accuracy <- function(err_mat, fc_mat, train) {
   )
 }
 
-# ---------- 8. Rolling & Expanding Accuracy ----------
+#compute accuracy for both rolling and expanding
 rolling_errors <- lapply(rolling_results, function(fc) actual_matrix - fc)
 expanding_errors <- lapply(expanding_results, function(fc) actual_matrix - fc)
 
@@ -692,7 +478,11 @@ print(do.call(rbind, rolling_accuracy))
 cat("===== Expanding Accuracy =====\n")
 print(do.call(rbind, expanding_accuracy))
 
-# ---------- 9. DM Test (Using MASE Loss) ----------
+#################################
+# significance of forecasting results
+###################################
+
+#dm test 
 naive_mae <- mean(abs(diff(ts_full[1:n_train_hours])))
 mase_loss <- function(e, naive_mae) abs(e)/naive_mae
 
@@ -722,7 +512,7 @@ dm_results <- dm_test_mase(rolling_errors, naive_mae)
 cat("===== DM Test (MASE Loss) =====\n")
 print(dm_results)
 
-# ---------- 10. MCS Test ----------
+#mcs test:
 loss_matrix <- sapply(rolling_errors, function(e) mase_loss(as.numeric(e), naive_mae))
 loss_matrix <- loss_matrix[complete.cases(loss_matrix), ]
 zero_var <- apply(loss_matrix,2,var)==0
@@ -731,7 +521,3 @@ loss_matrix <- loss_matrix[, !zero_var, drop=FALSE]
 mcs_results <- MCSprocedure(Loss=loss_matrix, alpha=0.05, B=2000)
 cat("===== MCS Results =====\n")
 print(mcs_results)
-
-
-
-
