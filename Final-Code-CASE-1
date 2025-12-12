@@ -481,7 +481,6 @@ print(do.call(rbind, expanding_accuracy))
 #################################
 # significance of forecasting results
 ###################################
-
 #dm test 
 naive_mae <- mean(abs(diff(ts_full[1:n_train_hours])))
 mase_loss <- function(e, naive_mae) abs(e)/naive_mae
@@ -513,6 +512,7 @@ cat("===== DM Test (MASE Loss) =====\n")
 print(dm_results)
 
 #mcs test:
+# Here we see that the models with forcast NA values are removed and only auto_sarima stays
 loss_matrix <- sapply(rolling_errors, function(e) mase_loss(as.numeric(e), naive_mae))
 loss_matrix <- loss_matrix[complete.cases(loss_matrix), ]
 zero_var <- apply(loss_matrix,2,var)==0
